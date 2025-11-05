@@ -3,6 +3,12 @@ import { useProgramState } from '../Sidebar';
 import { assignImm, clamp } from '@/src/utils/data';
 import { Vec3 } from '@/src/utils/vector';
 import { streamFromServer } from './RemoteClient';
+import { IModelShape } from '../GptModel';
+import { IModelExample } from '../Program';
+import { ICameraPos } from '../Camera';
+import { calculateWeightCount } from '../GptModelLayout';
+import { initBlockRender } from '../render/blockRender';
+import { genGptModelLayout } from '../GptModelLayout';
 import s from './PromptBar.module.scss';
 
 // Note: @xenova/transformers import is commented out due to onnxruntime-node bundling issues
@@ -61,7 +67,7 @@ async function fetchHfConfig(modelId: string): Promise<IModelConfigShapeLike | n
     return null;
 }
 
-function configToShape(cfg: IModelConfigShapeLike) {
+function configToShape(cfg: IModelConfigShapeLike): { C: number; nHeads: number; nBlocks: number; vocabSize: number; T: number } {
     // Map common keys across GPT/LLaMA/Gemma
     let C = cfg.n_embd ?? cfg.hidden_size ?? 768;
     let nHeads = cfg.n_head ?? cfg.num_attention_heads ?? 12;
@@ -69,6 +75,23 @@ function configToShape(cfg: IModelConfigShapeLike) {
     let vocabSize = cfg.vocab_size ?? 50257;
     let T = cfg.block_size ?? cfg.max_position_embeddings ?? 2048;
     return { C, nHeads, nBlocks, vocabSize, T };
+}
+
+function formatModelName(modelId: string): string {
+    // Extract a readable name from the model ID
+    // e.g., "meta-llama/Llama-3.2-1B-Instruct" -> "Llama 3.2 1B Instruct"
+    let parts = modelId.split('/');
+    let name = parts[parts.length - 1];
+    // Replace dashes and underscores with spaces, capitalize words
+    name = name.replace(/[-_]/g, ' ');
+    name = name.split(' ')
+        .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+        .join(' ');
+    return name;
+}
+
+function makeCamera(center: Vec3, angle: Vec3): ICameraPos {
+    return { center, angle };
 }
 
 export const PromptBar: React.FC<{}> = () => {
@@ -120,7 +143,7 @@ export const PromptBar: React.FC<{}> = () => {
             }
             
             let shape = configToShape(cfg);
-            prog.shape = {
+            let modelShape: IModelShape = {
                 B: 1,
                 T: shape.T,
                 C: shape.C,
@@ -129,19 +152,95 @@ export const PromptBar: React.FC<{}> = () => {
                 nBlocks: shape.nBlocks,
                 vocabSize: shape.vocabSize,
             };
+            // don't modify prog.shape - that's for the mainExample (nano-gpt)
+            // each model example has its own shape property
             
-            // Layout will automatically regenerate on next render via runProgram()
-            // Move/zoom camera a bit when shape changes for readability
-            prog.camera.center = new Vec3(0, 0, -Math.max(400, shape.C * 6));
-            prog.camera.angle = new Vec3(285, 22, 12);
+            // Create model name from ID
+            let modelName = formatModelName(id);
+            let weightCount = calculateWeightCount(modelShape);
+            
+            // Check if model already exists (by name)
+            let existingIndex = prog.examples.findIndex(ex => ex.name === modelName);
+            if (existingIndex >= 0) {
+                // Model already exists, select it instead of creating a new one
+                prog.currExampleId = existingIndex;
+                prog.camera.desiredCamera = prog.examples[existingIndex].camera;
+                prog.markDirty();
+                console.log('Model already loaded, selecting existing:', modelName);
+                return;
+            }
+            
+            // Calculate offset for positioning
+            // Place new models starting from mainExample, incrementing by delta
+            let delta = new Vec3(10000, 0, 0);
+            
+            // Find all used X positions (considering only non-negative positions near mainExample)
+            let usedXPositions = new Set<number>();
+            usedXPositions.add(prog.mainExample.offset?.x ?? 0);
+            prog.examples.forEach(ex => {
+                let x = ex.offset?.x ?? 0;
+                // Only consider models in the "new model" region (>= 0)
+                if (x >= 0) {
+                    usedXPositions.add(x);
+                }
+            });
+            
+            // Find the first free slot starting from mainExample position (0)
+            let baseX = prog.mainExample.offset?.x ?? 0;
+            let slotIndex = 1; // start checking from slot 1 (slot 0 is mainExample)
+            let nextX = baseX + (slotIndex * delta.x);
+            while (usedXPositions.has(nextX)) {
+                slotIndex++;
+                nextX = baseX + (slotIndex * delta.x);
+            }
+            let offset = new Vec3(nextX, 0, 0);
+            
+            console.log('Placing new model at offset:', offset, 'slot:', slotIndex);
+            
+            // Calculate camera position based on model size
+            let cameraCenter = new Vec3(offset.x, 0, -Math.max(400, shape.C * 6));
+            let cameraAngle = new Vec3(285, 22, 12);
+            
+            // Create model example
+            const ctx = prog.render?.ctx;
+            if (!ctx) {
+                console.warn('Renderer not ready yet; try again after canvas initializes');
+                return;
+            }
+
+            let modelExample: IModelExample = {
+                name: modelName,
+                enabled: true,
+                shape: modelShape,
+                offset: offset,
+                modelCardOffset: delta.mul(0.5),
+                blockRender: initBlockRender(ctx),
+                camera: makeCamera(cameraCenter, cameraAngle),
+            };
+            // Don't pre-generate layout - let the render loop handle it properly
+            // The layout will be generated in Program.ts with proper offset handling
+            
+            // Add to examples array
+            prog.examples.push(modelExample);
+            
+            // Select the newly loaded model
+            prog.currExampleId = prog.examples.length - 1;
+            prog.camera.desiredCamera = modelExample.camera;
             prog.markDirty();
             
             console.log('Applied model config:', {
+                name: modelName,
+                weightCount: weightCount,
                 nBlocks: shape.nBlocks,
                 nHeads: shape.nHeads,
                 C: shape.C,
                 vocabSize: shape.vocabSize,
                 T: shape.T,
+                offset: offset,
+                enabled: modelExample.enabled,
+                hasBlockRender: !!modelExample.blockRender,
+                totalExamples: prog.examples.length,
+                existingModels: prog.examples.map(e => ({ name: e.name, offset: e.offset })),
             });
         } finally {
             setLoadingCfg(false);
@@ -226,6 +325,73 @@ export const PromptBar: React.FC<{}> = () => {
         streamCleanupRef.current = stop;
     }
 
+    async function onAutoGenerate() {
+        if (!prog.wasmGptModel || !prog.jsGptModel) {
+            console.warn('Model not loaded. Please load a model first.');
+            return;
+        }
+
+        // tokenize prompt first
+        setTokenizing(true);
+        try {
+            let tokens: Float32Array | null = null;
+            
+            // try remote tokenization first
+            if (serverUrl) {
+                try {
+                    const resp = await fetch(serverUrl.replace(/\/$/, '') + '/tokenize', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            model_id: customModelId.trim() || modelId,
+                            prompt: prompt,
+                        }),
+                    });
+                    if (resp.ok) {
+                        const data = await resp.json();
+                        setTokenCount(data.count);
+                        let T = prog.shape.T;
+                        tokens = new Float32Array(Math.max(T, data.token_ids.length));
+                        for (let i = 0; i < data.token_ids.length; i++) {
+                            tokens[i] = data.token_ids[i];
+                        }
+                    }
+                } catch (e) {
+                    console.warn('Remote tokenization failed', e);
+                }
+            }
+            
+            // fallback: simple tokenization
+            if (!tokens) {
+                let promptTokens = prompt.trim().split(/\s+/);
+                setTokenCount(promptTokens.length);
+                let T = prog.shape.T;
+                tokens = new Float32Array(Math.max(T, promptTokens.length));
+                for (let i = 0; i < promptTokens.length; i++) {
+                    tokens[i] = i % prog.shape.vocabSize; // simple mapping
+                }
+            }
+            
+            // start auto-generation
+            prog.generation.active = true;
+            prog.generation.targetTokens = 10;
+            prog.generation.tokensGenerated = 0;
+            prog.generation.currentStep = 'idle';
+            prog.generation.stepProgress = 0;
+            prog.generation.cameraPhase = 0;
+            prog.generation.promptTokens = tokens;
+            prog.generation.generatedTokens = [];
+            
+            prog.displayTokensBuf = tokens;
+            prog.markDirty();
+            
+        } catch (e) {
+            console.error('Auto-generation setup failed', e);
+        } finally {
+            setTokenizing(false);
+        }
+    }
+
     return <div className={s.promptBar}>
         <div className={s.container}>
             <div className={s.row}>
@@ -277,6 +443,10 @@ export const PromptBar: React.FC<{}> = () => {
                 <button className={s.buttonGreen}
                     onClick={onGenerateRemote}
                 >{streaming ? 'Stop' : 'Generate (remote)'}</button>
+                <button className={s.buttonBlue}
+                    onClick={onAutoGenerate}
+                    disabled={tokenizing || !prog.wasmGptModel || !prog.jsGptModel || prog.generation.active}
+                >{prog.generation.active ? 'Generating...' : 'Auto Generate & Visualize'}</button>
             </div>
         </div>
         {streamText && <div className={s.streamOutput}>

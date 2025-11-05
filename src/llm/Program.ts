@@ -16,13 +16,24 @@ import { Mat4f } from "@/src/utils/matrix";
 import { runMouseHitTesting } from "./Interaction";
 import { RenderPhase } from "./render/sharedRender";
 import { drawBlockInfo } from "./components/BlockInfo";
-import { NativeFunctions } from "./NativeBindings";
+import { NativeFunctions, TensorType } from "./NativeBindings";
 import { IWasmGptModel, stepWasmModel, syncWasmDataWithJsAndGpu } from "./GptModelWasm";
 import { IMovementInfo, manageMovement } from "./components/MovementControls";
 import { IBlockRender, initBlockRender } from "./render/blockRender";
 import { ILayout } from "../utils/layout";
 import { DimStyle } from "./walkthrough/WalkthroughTools";
 import { Subscriptions } from "../utils/hooks";
+
+export interface IGenerationState {
+    active: boolean;
+    targetTokens: number; // how many tokens to generate
+    tokensGenerated: number; // how many we've generated so far
+    currentStep: 'idle' | 'embedding' | 'transformer' | 'output' | 'complete';
+    stepProgress: number; // 0-1 progress through current step
+    cameraPhase: number; // which layer we're animating through
+    promptTokens: Float32Array | null;
+    generatedTokens: number[];
+}
 
 export interface IProgramState {
     native: NativeFunctions | null;
@@ -45,6 +56,7 @@ export interface IProgramState {
     display: IDisplayState;
     pageLayout: ILayout;
     displayTokensBuf?: Float32Array | null;
+    generation: IGenerationState;
     markDirty: () => void;
 }
 
@@ -217,7 +229,17 @@ export function initProgramState(canvasEl: HTMLCanvasElement, fontAtlasData: IFo
             width: 0,
             isDesktop: true,
             isPhone: true,
-        }
+        },
+        generation: {
+            active: false,
+            targetTokens: 10,
+            tokensGenerated: 0,
+            currentStep: 'idle',
+            stepProgress: 0,
+            cameraPhase: 0,
+            promptTokens: null,
+            generatedTokens: [],
+        },
     };
 }
 
@@ -244,6 +266,11 @@ export function runProgram(view: IRenderView, state: IProgramState) {
         stepWasmModel(state.wasmGptModel, state.jsGptModel);
     }
 
+    // handle auto-generation
+    if (state.generation.active) {
+        runAutoGeneration(state, view);
+    }
+
     // generate the base model, incorporating the gpu-side model if available
     state.layout = genGptModelLayout(state.shape, state.jsGptModel);
 
@@ -258,10 +285,25 @@ export function runProgram(view: IRenderView, state: IProgramState) {
         if (example.enabled && !example.layout) {
             let layout = genGptModelLayout(example.shape, null, example.offset);
             example.layout = layout;
+            // mark instanced data as stale so it gets re-uploaded
+            if (example.blockRender) {
+                example.blockRender.instancedDataStale = true;
+            }
         }
     }
 
-    genModelViewMatrices(state, state.layout!);
+    // determine which model is selected - do this early so we can use its layout
+    let selectedExample = state.currExampleId === -1 ? state.mainExample : state.examples[state.currExampleId];
+    let selectedLayout = selectedExample.layout;
+    let selectedOffset = state.currExampleId === -1 ? Vec3.zero : selectedExample.offset;
+
+    // if a model is selected and it has a layout, use that layout for rendering
+    // otherwise use the main model's layout
+    if (selectedLayout) {
+        state.layout = selectedLayout;
+    }
+
+    genModelViewMatrices(state, state.layout!, selectedOffset);
 
     let queryRes = beginQueryAndGetPrevMs(state.render.queryManager, 'render');
     if (isNotNil(queryRes)) {
@@ -271,7 +313,7 @@ export function runProgram(view: IRenderView, state: IProgramState) {
     state.render.renderTiming = false; // state.pageLayout.isDesktop;
 
     // will modify layout; view; render a few things.
-    if (state.inWalkthrough) {
+    if (state.inWalkthrough && !state.generation.active) {
         runWalkthrough(state, view);
     }
 
@@ -281,9 +323,16 @@ export function runProgram(view: IRenderView, state: IProgramState) {
     // these will get modified by the walkthrough (stored where?)
     drawAllArrows(state.render, state.layout);
 
-    drawModelCard(state, state.layout, 'nano-gpt', new Vec3());
+    // draw main model card only if enabled
+    if (state.mainExample.enabled) {
+        // mainExample should always show its own name, not the selected model's name
+        // use mainExample's layout if available, otherwise use state.layout
+        let mainLayout = state.mainExample.layout ?? genGptModelLayout(state.shape, state.jsGptModel);
+        drawModelCard(state, mainLayout, state.mainExample.name, new Vec3());
+    }
     // drawTokens(state.render, state.layout, state.display);
 
+    // draw enabled example models
     for (let example of state.examples) {
         if (example.enabled && example.layout) {
             drawModelCard(state, example.layout, example.name, example.offset.add(example.modelCardOffset));
@@ -304,6 +353,15 @@ export function runProgram(view: IRenderView, state: IProgramState) {
         drawText(state.render.modelFontBuf, line, tw - w - 4, lineNo * opts.size * 1.3 + 4, opts)
         lineNo++;
     }
+    
+    // show generation status
+    if (state.generation.active) {
+        let gen = state.generation;
+        let statusText = `Generating token ${gen.tokensGenerated + 1}/${gen.targetTokens} - ${gen.currentStep}`;
+        let opts: IFontOpts = { color: new Vec4(0, 0.7, 0, 1), size: 16 };
+        let w = measureText(state.render.modelFontBuf, statusText, opts);
+        drawText(state.render.modelFontBuf, statusText, tw - w - 4, lineNo * opts.size * 1.3 + 4, opts);
+    }
 
     // render everything; i.e. here's where we actually do gl draw calls
     // up until now, we've just been putting data in cpu-side buffers
@@ -313,4 +371,238 @@ export function runProgram(view: IRenderView, state: IProgramState) {
     state.render.gl.flush();
 
     state.render.lastJsMs = performance.now() - timer0;
+}
+
+// auto-generation speed control (ms per step)
+const GENERATION_STEP_DURATION = 2000; // 2 seconds per step for slow visualization
+const CAMERA_TRANSITION_DURATION = 1500; // 1.5 seconds for camera transitions
+
+function runAutoGeneration(state: IProgramState, view: IRenderView) {
+    let gen = state.generation;
+    
+    if (!state.wasmGptModel || !state.jsGptModel) {
+        gen.active = false;
+        return;
+    }
+
+    // initialize if needed
+    if (gen.currentStep === 'idle' && gen.promptTokens) {
+        // set initial tokens
+        let inputTokensTensor = state.wasmGptModel.native.getModelTensor(
+            state.wasmGptModel.modelPtr,
+            TensorType.InputTokens
+        );
+        let T = state.shape.T;
+        for (let i = 0; i < Math.min(gen.promptTokens.length, T); i++) {
+            inputTokensTensor.buffer[i] = gen.promptTokens[i];
+        }
+        state.jsGptModel.inputLen = Math.min(gen.promptTokens.length, T);
+        
+        // run initial forward pass
+        state.wasmGptModel.native.runModel(state.wasmGptModel.modelPtr);
+        state.wasmGptModel.intersDirty = true;
+        syncWasmDataWithJsAndGpu(state.wasmGptModel, state.jsGptModel);
+        
+        gen.currentStep = 'embedding';
+        gen.stepProgress = 0;
+        gen.cameraPhase = 0;
+        animateCameraToLayer(state, 'embedding');
+    }
+
+    // update step progress
+    gen.stepProgress += view.dt / GENERATION_STEP_DURATION;
+    
+    if (gen.stepProgress >= 1.0) {
+        // move to next step
+        if (gen.currentStep === 'embedding') {
+            gen.currentStep = 'transformer';
+            gen.stepProgress = 0;
+            gen.cameraPhase = 0;
+            animateCameraToLayer(state, 'transformer', 0);
+        } else if (gen.currentStep === 'transformer') {
+            gen.cameraPhase++;
+            if (gen.cameraPhase >= state.shape.nBlocks) {
+                gen.currentStep = 'output';
+                gen.stepProgress = 0;
+                animateCameraToLayer(state, 'output');
+            } else {
+                gen.stepProgress = 0;
+                animateCameraToLayer(state, 'transformer', gen.cameraPhase);
+            }
+        } else if (gen.currentStep === 'output') {
+            // generate next token
+            let nextToken = sampleNextToken(state.jsGptModel);
+            gen.generatedTokens.push(nextToken);
+            gen.tokensGenerated++;
+            
+            // update display
+            if (state.jsGptModel.sortedBuf) {
+                let tIdx = state.jsGptModel.inputLen - 1;
+                let arr = new Float32Array(state.jsGptModel.inputLen + 1);
+                let inputTokensTensor = state.wasmGptModel.native.getModelTensor(
+                    state.wasmGptModel.modelPtr,
+                    TensorType.InputTokens
+                );
+                for (let i = 0; i < state.jsGptModel.inputLen; i++) {
+                    arr[i] = inputTokensTensor.buffer[i];
+                }
+                arr[state.jsGptModel.inputLen] = nextToken;
+                state.displayTokensBuf = arr;
+            }
+            
+            if (gen.tokensGenerated >= gen.targetTokens) {
+                gen.currentStep = 'complete';
+                gen.active = false;
+            } else {
+                // add the generated token to input before stepping
+                let inputTokensTensor = state.wasmGptModel.native.getModelTensor(
+                    state.wasmGptModel.modelPtr,
+                    TensorType.InputTokens
+                );
+                let tIdx = state.jsGptModel.inputLen;
+                if (tIdx < state.shape.T) {
+                    inputTokensTensor.buffer[tIdx] = nextToken;
+                    state.jsGptModel.inputLen = tIdx + 1;
+                    
+                    // run model forward pass with new token
+                    state.wasmGptModel.native.runModel(state.wasmGptModel.modelPtr);
+                    state.wasmGptModel.intersDirty = true;
+                    syncWasmDataWithJsAndGpu(state.wasmGptModel, state.jsGptModel);
+                }
+                
+                // reset for next generation cycle
+                gen.currentStep = 'embedding';
+                gen.stepProgress = 0;
+                gen.cameraPhase = 0;
+                animateCameraToLayer(state, 'embedding');
+            }
+        }
+    }
+    
+    // animate camera during current step
+    animateCameraDuringGeneration(state, view);
+    
+    state.markDirty();
+}
+
+function sampleNextToken(model: IGptModelLink): number {
+    if (!model.sortedBuf) {
+        return 0;
+    }
+    
+    let tIdx = model.inputLen - 1;
+    if (tIdx < 0) return 0;
+    
+    // get probabilities for the last token position
+    let vocabSize = model.shape.vocabSize;
+    let T = model.shape.T;
+    let probs: { token: number; prob: number }[] = [];
+    
+    for (let i = 0; i < vocabSize; i++) {
+        let idx = (tIdx * vocabSize + i) * 2;
+        if (idx + 1 < model.sortedBuf.length) {
+            let token = model.sortedBuf[idx];
+            let prob = model.sortedBuf[idx + 1];
+            probs.push({ token, prob });
+        }
+    }
+    
+    // sample from distribution (or take top token)
+    if (probs.length === 0) return 0;
+    
+    // for now, just take the top token (greedy sampling)
+    return probs[0].token;
+}
+
+function animateCameraToLayer(state: IProgramState, layer: 'embedding' | 'transformer' | 'output', blockIdx?: number) {
+    let layout = state.layout;
+    let center = state.camera.center.clone();
+    let angle = state.camera.angle.clone();
+    
+    if (layer === 'embedding') {
+        // camera position for embedding layer
+        let embedBlock = layout.residual0;
+        if (embedBlock) {
+            center = new Vec3(embedBlock.x + embedBlock.dx / 2, embedBlock.y + embedBlock.dy / 2, embedBlock.z + embedBlock.dz / 2);
+            angle = new Vec3(290, 20, 8);
+        }
+    } else if (layer === 'transformer') {
+        // camera position for transformer block
+        let blocks = layout.blocks;
+        if (blocks && blockIdx !== undefined && blockIdx < blocks.length) {
+            let block = blocks[blockIdx];
+            let blockBlk = block.mlpResidual;
+            if (blockBlk) {
+                center = new Vec3(blockBlk.x + blockBlk.dx / 2, blockBlk.y + blockBlk.dy / 2, blockBlk.z + blockBlk.dz / 2);
+                angle = new Vec3(290, 20, 7);
+            }
+        }
+    } else if (layer === 'output') {
+        // camera position for output layer
+        let outputBlock = layout.logitsSoftmax;
+        if (outputBlock) {
+            center = new Vec3(outputBlock.x + outputBlock.dx / 2, outputBlock.y + outputBlock.dy / 2, outputBlock.z + outputBlock.dz / 2);
+            angle = new Vec3(290, 20, 6);
+        }
+    }
+    
+    state.camera.desiredCamera = { center, angle };
+}
+
+function animateCameraDuringGeneration(state: IProgramState, view: IRenderView) {
+    let gen = state.generation;
+    
+    // highlight blocks based on current step
+    if (gen.currentStep === 'embedding') {
+        highlightBlocks(state, ['embedding']);
+    } else if (gen.currentStep === 'transformer') {
+        highlightBlocks(state, ['transformer', gen.cameraPhase]);
+    } else if (gen.currentStep === 'output') {
+        highlightBlocks(state, ['output']);
+    }
+}
+
+function highlightBlocks(state: IProgramState, blocks: (string | number)[]) {
+    // reset all highlights
+    for (let cube of state.layout.cubes) {
+        cube.highlight = 0.0;
+    }
+    
+    if (blocks[0] === 'embedding') {
+        let embedBlocks = [
+            state.layout.idxObj,
+            state.layout.tokEmbedObj,
+            state.layout.posEmbedObj,
+            state.layout.residual0,
+        ];
+        for (let blk of embedBlocks) {
+            if (blk) blk.highlight = 0.6;
+        }
+    } else if (blocks[0] === 'transformer' && typeof blocks[1] === 'number') {
+        let blockIdx = blocks[1];
+        let transformerBlocks = state.layout.blocks;
+        if (transformerBlocks && blockIdx < transformerBlocks.length) {
+            let block = transformerBlocks[blockIdx];
+            let blockCubes = [
+                block.ln1.lnResid,
+                block.attnOut,
+                block.attnResidual,
+                block.ln2.lnResid,
+                block.mlpResult,
+                block.mlpResidual,
+            ];
+            for (let blk of blockCubes) {
+                if (blk) blk.highlight = 0.6;
+            }
+        }
+    } else if (blocks[0] === 'output') {
+        let outputBlocks = [
+            state.layout.ln_f.lnResid,
+            state.layout.logits,
+            state.layout.logitsSoftmax,
+        ];
+        for (let blk of outputBlocks) {
+            if (blk) blk.highlight = 0.6;
+        }
+    }
 }

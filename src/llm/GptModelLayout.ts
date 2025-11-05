@@ -175,6 +175,14 @@ export interface IModelLayout {
     cubes: IBlkDef[];
 }
 
+export function calculateWeightCount(shape: IModelShape): number {
+    let { vocabSize, C, T, nBlocks } = shape;
+    // Same calculation as in genGptModelLayout
+    return vocabSize*C + T*C +
+        nBlocks * ((2*C + 4*C*C + C + 3*C) + // self attn
+                   (2*C + 4*C + 8*C*C + C)) + 2*C; // mlp
+}
+
 export function cellPosition(layout: IModelLayout, blk: IBlkDef, dim: Dim, index: number) {
     let { x, rangeOffsets } = dimProps(blk, dim);
     let base = x + layout.cell * index;

@@ -469,6 +469,11 @@ export function renderAllBlocks(blockRender: IBlockRender, layout: IModelLayout,
 
 
 export function renderAllBlocksInstanced(blockRender: IBlockRender, layout: IModelLayout, modelMtx: Mat4f, camPos: Vec3) {
+    if (!blockRender) {
+        console.error('renderAllBlocksInstanced: blockRender is null');
+        return;
+    }
+    
     if (!blockRender.instancedShader.ready) {
         return;
     }

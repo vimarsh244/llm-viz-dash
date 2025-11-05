@@ -128,8 +128,19 @@ export function renderModel(state: IProgramState) {
     let { layout, render: args, camera } = state;
     let { gl, blockRender, size } = args;
 
+    // determine which model is selected and its offset
+    let selectedExample = state.currExampleId === -1 ? state.mainExample : state.examples[state.currExampleId];
+    let selectedOffset = state.currExampleId === -1 ? Vec3.zero : selectedExample.offset;
+
     let { modelMtx, viewMtx } = camera;
     let { camPos } = cameraToMatrixView(camera);
+
+    // adjust model matrix to account for selected model's offset
+    // when rendering a selected model, we need to translate by the offset
+    // to position blocks correctly in world space
+    let renderModelMtx = selectedOffset.lenSq() > 0 
+        ? modelMtx.mul(Mat4f.fromTranslation(selectedOffset))
+        : modelMtx;
 
     let lightPos = [
         new Vec3(100, 400, 600),
@@ -144,8 +155,8 @@ export function renderModel(state: IProgramState) {
     let lightPosArr = new Float32Array(3 * 3);
     let lightColorArr = new Float32Array(3 * 3);
     for (let i = 0; i < 3; i++) {
-        modelMtx.mulVec3Proj(lightPos[i]).writeToBuf(lightPosArr, i * 3);
-        modelMtx.mulVec3Proj(lightColor[i]).writeToBuf(lightColorArr, i * 3);
+        renderModelMtx.mulVec3Proj(lightPos[i]).writeToBuf(lightPosArr, i * 3);
+        renderModelMtx.mulVec3Proj(lightColor[i]).writeToBuf(lightColorArr, i * 3);
     }
 
 
@@ -175,7 +186,7 @@ export function renderModel(state: IProgramState) {
         writeTextToBuffer(args.modelFontBuf, text, new Vec4(0,0,0,1), w - tw - 4, 4, fontSize, new Mat4f());
     }
 
-    writeModelViewUbo(args.sharedRender, modelMtx, viewMtx);
+    writeModelViewUbo(args.sharedRender, renderModelMtx, viewMtx);
 
     {
         let blurBlocks = layout.cubes.filter(a => a.highlight > 0)
@@ -190,12 +201,12 @@ export function renderModel(state: IProgramState) {
     uploadAllTris(args.triRender);
     uploadAllText(args.modelFontBuf);
 
-    renderAllBlocks(blockRender, layout, modelMtx, camPos, lightPosArr, lightColorArr);
+    renderAllBlocks(blockRender, layout, renderModelMtx, camPos, lightPosArr, lightColorArr);
 
     args.sharedRender.activePhase = RenderPhase.Opaque;
 
     for (let example of state.examples) {
-        if (example.enabled && example.layout) {
+        if (example.enabled && example.layout && example.blockRender) {
             let { modelMtx, viewMtx } = camera;
             let { camPos } = cameraToMatrixView(camera);
             var modelMtxLocal = modelMtx.mul(Mat4f.fromTranslation(example.offset));
