@@ -375,19 +375,36 @@ export function writeTextToBuffer(fontBuf: IFontBuffers, text: string, color: Ve
 
     vertBuf.usedEls += numGlyphs * 6;
 
-    // TODO: Do realloc stuff
     mtx = mtx ?? new Mat4f();
     color = color ?? new Vec4(1, 1, 1, 1);
 
+    // Resize buffer if needed - check BEFORE writing
     if (fontBuf.segmentsUsed >= fontBuf.segmentCapacity) {
-        let newCapacity = fontBuf.segmentCapacity * 2;
+        let newCapacity = Math.max(fontBuf.segmentCapacity * 2, 2048); // Minimum 2048 segments
         let newBuf = new Float32Array(newCapacity * floatsPerSegment);
-        newBuf.set(fontBuf.localTexBuffer);
+        // Copy existing data
+        newBuf.set(fontBuf.localTexBuffer, 0);
         fontBuf.localTexBuffer = newBuf;
+        fontBuf.segmentCapacity = newCapacity; // Update capacity!
     }
 
-    fontBuf.localTexBuffer.set(mtx, fontBuf.segmentsUsed * floatsPerSegment + 0);
-    fontBuf.localTexBuffer.set(color.toArray(), fontBuf.segmentsUsed * floatsPerSegment + 16);
+    // Calculate write offset and verify we have enough space
+    let offset = fontBuf.segmentsUsed * floatsPerSegment;
+    if (offset + floatsPerSegment > fontBuf.localTexBuffer.length) {
+        // Safety check - should never happen if resize logic is correct
+        console.error(`Font buffer overflow! segmentsUsed=${fontBuf.segmentsUsed}, capacity=${fontBuf.segmentCapacity}, bufferLength=${fontBuf.localTexBuffer.length}`);
+        // Emergency resize
+        let newCapacity = fontBuf.segmentCapacity * 2;
+        let newBuf = new Float32Array(newCapacity * floatsPerSegment);
+        newBuf.set(fontBuf.localTexBuffer, 0);
+        fontBuf.localTexBuffer = newBuf;
+        fontBuf.segmentCapacity = newCapacity;
+        offset = fontBuf.segmentsUsed * floatsPerSegment;
+    }
+    
+    // Write matrix (16 floats) and color (4 floats)
+    fontBuf.localTexBuffer.set(mtx, offset);
+    fontBuf.localTexBuffer.set(color.toArray(), offset + 16);
     fontBuf.segmentsUsed += 1;
 }
 

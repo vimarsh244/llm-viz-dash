@@ -20,6 +20,7 @@ import { WelcomePopup } from './WelcomePopup';
 import { KeyboardManagerContext, KeyboardOrder, useGlobalKeyboard } from '@/src/utils/keyboard';
 import { Resizer } from '../utils/Resizer';
 import { ModelSelectorToolbar } from './components/ModelSelectorToolbar';
+import { PromptBar } from './components/PromptBar';
 
 async function fetchTensorData(url: string): Promise<ITensorSet> {
     let resp = await fetch(url);
@@ -207,6 +208,7 @@ export function LayerView() {
                 {/* <MovementControls /> */}
             </CanvasEventSurface>
             {/* <WelcomePopup /> */}
+            <PromptBar />
             {/* <div className="absolute bottom-0 right-0 m-5 bg-white rounded border">
                 <button className='hover:bg-blue-400' onClick={handleCopyCamera}>
                     Copy Camera

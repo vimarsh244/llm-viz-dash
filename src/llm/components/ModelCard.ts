@@ -184,8 +184,19 @@ export function renderOutputBoxes(state: IProgramState, layout: IGptModelLayout,
             let cx = tl.x + (i + 0.5) * cellW;
 
             for (let j = 0; j < vocabSize; j++) {
-                let tokIdx = sortedOutput[(i * vocabSize + j) * 2 + 0];
-                let tokProb = sortedOutput[(i * vocabSize + j) * 2 + 1];
+                let idx = (i * vocabSize + j) * 2;
+                // Check bounds before accessing array
+                if (idx + 1 >= sortedOutput.length) {
+                    break;
+                }
+                
+                let tokIdx = sortedOutput[idx + 0];
+                let tokProb = sortedOutput[idx + 1];
+
+                // Skip if tokIdx is undefined or invalid
+                if (tokIdx === undefined || tokIdx === null || isNaN(tokIdx)) {
+                    continue;
+                }
 
                 let partTop = tl.y + usedSoFar * outCellH;
                 let partH = tokProb * outCellH;

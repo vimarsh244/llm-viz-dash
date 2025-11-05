@@ -15,6 +15,7 @@
         "@fortawesome/free-solid-svg-icons": "6.4.0",
         "@fortawesome/react-fontawesome": "0.2.0",
         "@vercel/analytics": "1.0.2",
+        "@xenova/transformers": "2.17.2",
         "clsx": "2.0.0",
         "d3-color": "3.1.0",
         "next": "13.4.19",
@@ -35,6 +36,7 @@
         "eslint-plugin-react": "7.33.1",
         "eslint-plugin-react-hooks": "4.6.0",
         "msdf-bmfont-xml": "2.7.0",
+        "null-loader": "^4.0.1",
         "postcss": "8.4.29",
         "postcss-import": "15.1.0",
         "postcss-nesting": "12.0.1",
@@ -63,5 +65,6 @@
             "@next/next/no-img-element": "off",
             "@next/next/no-page-custom-font": "off"
         }
-    }
+    },
+    "packageManager": "yarn@1.22.22+sha512.a6b2f7906b721bba3d67d4aff083df04dad64c399707841b7acf00f6b133b7ac24255f2652fa22ae3534329dc6180534e98d17432037ff6fd140556e2bb3137e"
 }

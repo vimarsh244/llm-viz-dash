@@ -44,6 +44,7 @@ export interface IProgramState {
     movement: IMovementInfo;
     display: IDisplayState;
     pageLayout: ILayout;
+    displayTokensBuf?: Float32Array | null;
     markDirty: () => void;
 }
 
@@ -245,6 +246,11 @@ export function runProgram(view: IRenderView, state: IProgramState) {
 
     // generate the base model, incorporating the gpu-side model if available
     state.layout = genGptModelLayout(state.shape, state.jsGptModel);
+
+    // allow external tokenization to override input token visualization
+    if (state.displayTokensBuf && state.layout?.extraSources) {
+        state.layout.extraSources.idx = state.displayTokensBuf;
+    }
 
     // @TODO: handle different models in the same scene.
     // Maybe need to copy a lot of different things like the entire render state per model?
