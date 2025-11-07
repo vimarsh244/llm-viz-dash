@@ -92,6 +92,10 @@ function formatModelName(modelId: string): string {
 
 function makeCamera(center: Vec3, angle: Vec3): ICameraPos {
     return { center, angle };
+    // TODO: add camera position based on model size
+    // let cameraCenter = new Vec3(offset.x, 0, -Math.max(400, shape.C * 6));
+    // let cameraAngle = new Vec3(285, 22, 12);
+    // return { center: cameraCenter, angle: cameraAngle };
 }
 
 export const PromptBar: React.FC<{}> = () => {
@@ -143,6 +147,8 @@ export const PromptBar: React.FC<{}> = () => {
             }
             
             let shape = configToShape(cfg);
+
+
             let modelShape: IModelShape = {
                 B: 1,
                 T: shape.T,

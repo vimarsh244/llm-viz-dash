@@ -292,6 +292,13 @@ export function runProgram(view: IRenderView, state: IProgramState) {
         }
     }
 
+
+
+
+
+
+
+    
     // determine which model is selected - do this early so we can use its layout
     let selectedExample = state.currExampleId === -1 ? state.mainExample : state.examples[state.currExampleId];
     let selectedLayout = selectedExample.layout;
