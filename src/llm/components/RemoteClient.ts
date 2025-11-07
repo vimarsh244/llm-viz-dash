@@ -9,10 +9,8 @@ export function streamFromServer(args: {
     const ctrl = new AbortController();
 
     const url = serverUrl.replace(/\/$/, '') + '/generate/stream';
-    const es = new EventSource(url + '?noop=1'); // pre-open; we'll close and reopen via fetch-based SSE polyfill if needed
-    es.close();
-
-    // Browser-native SSE requires GET. We'll use fetch with ReadableStream to be robust.
+    
+    // use fetch with ReadableStream for SSE streaming (supports POST)
     fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
